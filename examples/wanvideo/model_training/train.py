@@ -3,6 +3,7 @@ from diffsynth.core import UnifiedDataset
 from diffsynth.core.data.operators import LoadVideo, LoadAudio, ImageCropAndResize, ToAbsolutePath
 from diffsynth.pipelines.wan_video import WanVideoPipeline, ModelConfig
 from diffsynth.diffusion import *
+from diffsynth.diffusion.logger import ModelLoggerWithCleanup
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 
@@ -148,6 +149,21 @@ if __name__ == "__main__":
             "input_audio": ToAbsolutePath(args.dataset_base_path) >> LoadAudio(sr=16000),
         }
     )
+    
+    # Initialize logger first for auto-resume capability
+    model_logger = ModelLoggerWithCleanup(
+        args.output_path,
+        remove_prefix_in_ckpt=args.remove_prefix_in_ckpt,
+    )
+    
+    # Auto-resume: check for latest checkpoint BEFORE creating model
+    lora_checkpoint = args.lora_checkpoint
+    if lora_checkpoint is None and args.lora_base_model is not None:
+        latest = model_logger.find_latest_checkpoint()
+        if latest:
+            print(f"Auto-resuming from: {latest}")
+            lora_checkpoint = latest
+    
     model = WanTrainingModule(
         model_paths=args.model_paths,
         model_id_with_origin_paths=args.model_id_with_origin_paths,
@@ -157,7 +173,7 @@ if __name__ == "__main__":
         lora_base_model=args.lora_base_model,
         lora_target_modules=args.lora_target_modules,
         lora_rank=args.lora_rank,
-        lora_checkpoint=args.lora_checkpoint,
+        lora_checkpoint=lora_checkpoint,
         preset_lora_path=args.preset_lora_path,
         preset_lora_model=args.preset_lora_model,
         use_gradient_checkpointing=args.use_gradient_checkpointing,
@@ -170,10 +186,7 @@ if __name__ == "__main__":
         max_timestep_boundary=args.max_timestep_boundary,
         min_timestep_boundary=args.min_timestep_boundary,
     )
-    model_logger = ModelLogger(
-        args.output_path,
-        remove_prefix_in_ckpt=args.remove_prefix_in_ckpt,
-    )
+
     launcher_map = {
         "sft:data_process": launch_data_process_task,
         "direct_distill:data_process": launch_data_process_task,

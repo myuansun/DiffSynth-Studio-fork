@@ -41,3 +41,51 @@ class ModelLogger:
             os.makedirs(self.output_path, exist_ok=True)
             path = os.path.join(self.output_path, file_name)
             accelerator.save(state_dict, path, safe_serialization=True)
+
+
+import glob
+
+class ModelLoggerWithCleanup(ModelLogger):
+    """Enhanced ModelLogger that keeps only the latest checkpoint"""
+    
+    def __init__(self, output_path, remove_prefix_in_ckpt=None, state_dict_converter=lambda x:x):
+        super().__init__(output_path, remove_prefix_in_ckpt, state_dict_converter)
+        self.latest_checkpoint = None
+        
+    def save_model(self, accelerator, model, file_name):
+        accelerator.wait_for_everyone()
+        if accelerator.is_main_process:
+            # Delete previous checkpoint before saving new one
+            if self.latest_checkpoint and os.path.exists(self.latest_checkpoint):
+                try:
+                    os.remove(self.latest_checkpoint)
+                    print(f"Removed previous checkpoint: {self.latest_checkpoint}")
+                except Exception as e:
+                    print(f"Warning: Could not remove {self.latest_checkpoint}: {e}")
+            
+            # Save new checkpoint
+            state_dict = accelerator.get_state_dict(model)
+            state_dict = accelerator.unwrap_model(model).export_trainable_state_dict(state_dict, remove_prefix=self.remove_prefix_in_ckpt)
+            state_dict = self.state_dict_converter(state_dict)
+            os.makedirs(self.output_path, exist_ok=True)
+            path = os.path.join(self.output_path, file_name)
+            accelerator.save(state_dict, path, safe_serialization=True)
+            
+            # Update latest checkpoint path
+            self.latest_checkpoint = path
+            print(f"Saved checkpoint: {path}")
+            
+    def find_latest_checkpoint(self):
+        """Find the latest checkpoint in the output directory for resuming"""
+        if not os.path.exists(self.output_path):
+            return None
+            
+        # Look for step-based checkpoints
+        step_checkpoints = glob.glob(os.path.join(self.output_path, "step-*.safetensors"))
+        if step_checkpoints:
+            # Sort by step number
+            step_checkpoints.sort(key=lambda x: int(x.split('step-')[1].split('.')[0]))
+            return step_checkpoints[-1]
+            
+        return None
+
