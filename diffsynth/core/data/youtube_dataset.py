@@ -9,8 +9,9 @@ frame images (JPEGs) in directory structures like:
         └── segment*/
             ├── origin/
             │   └── frame_*.jpg
-            └── skeleton/
-                └── frame_*.jpg
+            ├── skeleton/
+            │   └── frame_*.jpg
+            └── keypoints.npy
 
 Classes:
     YoutubeDataset: Base dataset for loading frame sequences
@@ -23,9 +24,160 @@ import random
 import warnings
 from typing import Dict, List, Optional, Set, Tuple
 
+import numpy as np
 import torch
 import torchvision
 from PIL import Image
+
+
+def compute_keypoint_bbox(
+    keypoints_frame: dict,
+    img_width: int,
+    img_height: int,
+    padding: float = 0.1,
+    min_confidence: float = 0.3,
+) -> Tuple[int, int, int, int]:
+    """
+    Compute bounding box from keypoints for a single frame.
+    
+    Args:
+        keypoints_frame: Dict with 'bodies', 'hands', 'faces' keys
+        img_width: Original image width
+        img_height: Original image height  
+        padding: Fraction of bbox size to add as padding
+        min_confidence: Minimum confidence to include a keypoint
+    
+    Returns:
+        (x1, y1, x2, y2) bounding box in pixel coordinates
+    """
+    all_points = []
+    
+    # Extract body keypoints
+    if 'bodies' in keypoints_frame and keypoints_frame['bodies']:
+        bodies = keypoints_frame['bodies']
+        if isinstance(bodies, dict) and 'candidate' in bodies:
+            candidates = bodies['candidate']
+            scores = bodies.get('score', np.ones((1, len(candidates))))
+            if len(scores.shape) == 2:
+                scores = scores[0]  # Take first person's scores
+            for i, pt in enumerate(candidates):
+                if i < len(scores) and scores[i] > min_confidence:
+                    all_points.append(pt)
+    
+    # Extract hand keypoints
+    if 'hands' in keypoints_frame and keypoints_frame['hands'] is not None:
+        hands = keypoints_frame['hands']
+        hands_score = keypoints_frame.get('hands_score')
+        for hand_idx in range(len(hands)):
+            hand_pts = hands[hand_idx]
+            for pt_idx, pt in enumerate(hand_pts):
+                if hands_score is not None and hands_score[hand_idx, pt_idx] > min_confidence:
+                    all_points.append(pt)
+                elif hands_score is None:
+                    all_points.append(pt)
+    
+    # Extract face keypoints (less weight - just for inclusion)
+    if 'faces' in keypoints_frame and keypoints_frame['faces'] is not None:
+        faces = keypoints_frame['faces']
+        if len(faces) > 0:
+            # Just use face center, not all 68 points
+            face_pts = faces[0]
+            face_center = np.mean(face_pts, axis=0)
+            all_points.append(face_center)
+    
+    if not all_points:
+        # No valid keypoints - return full image
+        return (0, 0, img_width, img_height)
+    
+    all_points = np.array(all_points)
+    
+    # Convert normalized coords to pixels
+    x_coords = all_points[:, 0] * img_width
+    y_coords = all_points[:, 1] * img_height
+    
+    # Compute bbox
+    x1, x2 = x_coords.min(), x_coords.max()
+    y1, y2 = y_coords.min(), y_coords.max()
+    
+    # Add padding
+    w, h = x2 - x1, y2 - y1
+    pad_x = w * padding
+    pad_y = h * padding
+    
+    x1 = max(0, x1 - pad_x)
+    y1 = max(0, y1 - pad_y)
+    x2 = min(img_width, x2 + pad_x)
+    y2 = min(img_height, y2 + pad_y)
+    
+    x1_i, y1_i, x2_i, y2_i = int(x1), int(y1), int(x2), int(y2)
+    if x2_i <= x1_i:
+        x1_i = max(0, min(x1_i, img_width - 1))
+        x2_i = min(img_width, x1_i + 1)
+    if y2_i <= y1_i:
+        y1_i = max(0, min(y1_i, img_height - 1))
+        y2_i = min(img_height, y1_i + 1)
+    return (x1_i, y1_i, x2_i, y2_i)
+
+
+def compute_adaptive_crop_box(
+    bbox: Tuple[int, int, int, int],
+    img_width: int,
+    img_height: int,
+    target_aspect: float,  # height / width
+) -> Tuple[int, int, int, int]:
+    """
+    Expand bbox to match target aspect ratio while staying within image bounds.
+    
+    Args:
+        bbox: (x1, y1, x2, y2) keypoint bounding box
+        img_width: Original image width
+        img_height: Original image height
+        target_aspect: Target aspect ratio (height / width)
+    
+    Returns:
+        (x1, y1, x2, y2) adjusted crop box
+    """
+    x1, y1, x2, y2 = bbox
+    bbox_w = x2 - x1
+    bbox_h = y2 - y1
+    bbox_cx = (x1 + x2) / 2
+    bbox_cy = (y1 + y2) / 2
+    
+    current_aspect = bbox_h / max(bbox_w, 1)
+    
+    if current_aspect < target_aspect:
+        # Need more height
+        new_h = bbox_w * target_aspect
+        new_w = bbox_w
+    else:
+        # Need more width
+        new_w = bbox_h / target_aspect
+        new_h = bbox_h
+    
+    # Expand to fit within image while keeping center
+    # Check if we need to expand further to stay within bounds
+    half_w = new_w / 2
+    half_h = new_h / 2
+    
+    # Adjust center if crop would go out of bounds
+    cx = max(half_w, min(img_width - half_w, bbox_cx))
+    cy = max(half_h, min(img_height - half_h, bbox_cy))
+    
+    # If crop is larger than image, constrain to image size
+    if new_w > img_width:
+        new_w = img_width
+        cx = img_width / 2
+    if new_h > img_height:
+        new_h = img_height
+        cy = img_height / 2
+    
+    # Final bbox
+    x1 = int(max(0, cx - new_w / 2))
+    y1 = int(max(0, cy - new_h / 2))
+    x2 = int(min(img_width, cx + new_w / 2))
+    y2 = int(min(img_height, cy + new_h / 2))
+    
+    return (x1, y1, x2, y2)
 
 
 class YoutubeDataset(torch.utils.data.Dataset):
@@ -38,8 +190,9 @@ class YoutubeDataset(torch.utils.data.Dataset):
             └── segment{num}/
                 ├── origin/
                 │   └── frame_*.jpg
-                └── skeleton/
-                    └── frame_*.jpg
+                ├── skeleton/
+                │   └── frame_*.jpg
+                └── keypoints.npy (optional, for keypoint-aware cropping)
 
     __getitem__ returns:
         {
@@ -69,6 +222,9 @@ class YoutubeDataset(torch.utils.data.Dataset):
         width: Optional[int] = None,
         height_division_factor: int = 16,
         width_division_factor: int = 16,
+        # Keypoint-aware cropping:
+        use_keypoint_crop: bool = True,
+        keypoint_padding: float = 0.15,
         # Repeat factor:
         repeat: int = 1,
         # Logging:
@@ -88,6 +244,8 @@ class YoutubeDataset(torch.utils.data.Dataset):
             reference_strategy = getattr(args, 'youtube_reference_strategy', reference_strategy)
             default_prompt = getattr(args, 'youtube_default_prompt', default_prompt)
             repeat = getattr(args, 'dataset_repeat', repeat)
+            use_keypoint_crop = getattr(args, 'youtube_keypoint_crop', use_keypoint_crop)
+            keypoint_padding = getattr(args, 'youtube_keypoint_padding', keypoint_padding)
         
         self.base_folder = base_folder
         self.max_pixels = max_pixels
@@ -114,6 +272,10 @@ class YoutubeDataset(torch.utils.data.Dataset):
         self.device = device
         self.reference_strategy = reference_strategy
         self.repeat = repeat
+        
+        # Keypoint cropping config
+        self.use_keypoint_crop = use_keypoint_crop
+        self.keypoint_padding = keypoint_padding
 
         # Scan segments
         self.segments: List[Dict] = []
@@ -126,6 +288,9 @@ class YoutubeDataset(torch.utils.data.Dataset):
 
         if verbose:
             print(f"[YoutubeDataset] Found {len(self.segments)} segments.")
+            if use_keypoint_crop:
+                kp_count = sum(1 for s in self.segments if s.get("keypoints_path"))
+                print(f"[YoutubeDataset] {kp_count}/{len(self.segments)} have keypoints for adaptive cropping.")
 
     def __len__(self) -> int:
         return len(self.segments) * self.repeat
@@ -135,6 +300,7 @@ class YoutubeDataset(torch.utils.data.Dataset):
         origin_frames = seg["origin_frames"]
         origin_path = seg["origin_path"]
         skeleton_path = seg["skeleton_path"]
+        keypoints_path = seg.get("keypoints_path")
 
         # Choose a consecutive snippet with stride
         max_start = len(origin_frames) - (self.sample_frames - 1) * self.stride - 1
@@ -142,28 +308,63 @@ class YoutubeDataset(torch.utils.data.Dataset):
         indices = [start + i * self.stride for i in range(self.sample_frames)]
         names = [origin_frames[min(i, len(origin_frames) - 1)] for i in indices]
 
-        # Load raw PILs
-        video_imgs_raw = [self._load_pil(os.path.join(origin_path, f)) for f in names]
+        # Load keypoints if available
+        keypoints = None
+        if self.use_keypoint_crop and keypoints_path and os.path.exists(keypoints_path):
+            try:
+                keypoints = np.load(keypoints_path, allow_pickle=True)
+            except Exception:
+                keypoints = None
 
-        # Determine target (H, W) from first frame
-        target_h, target_w = self.get_height_width(video_imgs_raw[0])
+        # Load first frame to determine dimensions
+        first_img = self._load_pil(os.path.join(origin_path, names[0]))
+        img_width, img_height = first_img.size
+        
+        # Determine target dimensions
+        target_h, target_w = self.get_height_width(first_img)
+        target_aspect = target_h / target_w
 
-        # Resize all streams consistently
-        video_imgs = [self.crop_and_resize(img, target_h, target_w) for img in video_imgs_raw]
+        # Compute crop boxes for each frame
+        crop_boxes = []
+        for frame_idx, name in zip(indices, names):
+            if keypoints is not None and frame_idx < len(keypoints):
+                kp_frame = keypoints[frame_idx]
+                bbox = compute_keypoint_bbox(
+                    kp_frame, img_width, img_height,
+                    padding=self.keypoint_padding
+                )
+                crop_box = compute_adaptive_crop_box(bbox, img_width, img_height, target_aspect)
+            else:
+                # Fallback to center crop
+                crop_box = self._center_crop_box(img_width, img_height, target_aspect)
+            crop_boxes.append(crop_box)
 
+        # Load and crop origin frames
+        video_imgs = []
+        for name, crop_box in zip(names, crop_boxes):
+            img = self._load_pil(os.path.join(origin_path, name))
+            img = self._crop_and_resize(img, crop_box, target_h, target_w)
+            video_imgs.append(img)
+
+        # Load and crop skeleton frames with same crop boxes
         control_imgs = []
-        for f in names:
-            sk_path = os.path.join(skeleton_path, f)
+        for name, crop_box in zip(names, crop_boxes):
+            sk_path = os.path.join(skeleton_path, name)
             if os.path.exists(sk_path):
                 sk_img = self._load_pil(sk_path, force_rgb=True)
             else:
                 # Return black image if skeleton not available
-                sk_img = Image.new("RGB", video_imgs_raw[0].size, (0, 0, 0))
-            control_imgs.append(self.crop_and_resize(sk_img, target_h, target_w))
+                sk_img = Image.new("RGB", (img_width, img_height), (0, 0, 0))
+            sk_img = self._crop_and_resize(sk_img, crop_box, target_h, target_w)
+            control_imgs.append(sk_img)
 
-        # Reference image
-        ref_img_raw = self._load_pil(seg["reference_path"])
-        reference_list = [self.crop_and_resize(ref_img_raw, target_h, target_w)]
+        # Reference image - use first frame's crop
+        ref_img = self._load_pil(seg["reference_path"])
+        ref_crop_box = crop_boxes[0] if crop_boxes else self._center_crop_box(
+            ref_img.size[0], ref_img.size[1], target_aspect
+        )
+        ref_img = self._crop_and_resize(ref_img, ref_crop_box, target_h, target_w)
+        reference_list = [ref_img]
 
         return {
             "prompt": seg["prompt"],
@@ -171,6 +372,40 @@ class YoutubeDataset(torch.utils.data.Dataset):
             "control_video": control_imgs,
             "reference_image": reference_list,
         }
+
+    def _center_crop_box(
+        self, img_width: int, img_height: int, target_aspect: float
+    ) -> Tuple[int, int, int, int]:
+        """Compute center crop box for given target aspect ratio."""
+        current_aspect = img_height / img_width
+        
+        if current_aspect > target_aspect:
+            # Image is taller - crop height
+            new_h = int(img_width * target_aspect)
+            y1 = (img_height - new_h) // 2
+            return (0, y1, img_width, y1 + new_h)
+        else:
+            # Image is wider - crop width
+            new_w = int(img_height / target_aspect)
+            x1 = (img_width - new_w) // 2
+            return (x1, 0, x1 + new_w, img_height)
+
+    def _crop_and_resize(
+        self,
+        image: Image.Image,
+        crop_box: Tuple[int, int, int, int],
+        target_height: int,
+        target_width: int,
+    ) -> Image.Image:
+        """Crop image using box and resize to target dimensions."""
+        x1, y1, x2, y2 = crop_box
+        cropped = image.crop((x1, y1, x2, y2))
+        resized = torchvision.transforms.functional.resize(
+            cropped,
+            (target_height, target_width),
+            interpolation=torchvision.transforms.InterpolationMode.BILINEAR
+        )
+        return resized
 
     def _scan_processed_folder(self, folder_path: str, verbose: bool = True):
         """Scan a processed_videos* folder for valid segments."""
@@ -186,6 +421,7 @@ class YoutubeDataset(torch.utils.data.Dataset):
                 segment_path = os.path.join(video_path, segment_name)
                 origin_path = os.path.join(segment_path, "origin")
                 skeleton_path = os.path.join(segment_path, "skeleton")
+                keypoints_path = os.path.join(segment_path, "keypoints.npy")
                 
                 if not os.path.isdir(origin_path):
                     continue
@@ -221,8 +457,10 @@ class YoutubeDataset(torch.utils.data.Dataset):
                 self.segments.append({
                     "video_id": video_id,
                     "segment": segment_name,
+                    "segment_path": segment_path,
                     "origin_path": origin_path,
                     "skeleton_path": skeleton_path,
+                    "keypoints_path": keypoints_path if os.path.exists(keypoints_path) else None,
                     "origin_frames": origin_frames,
                     "prompt": prompt,
                     "reference_path": ref,
@@ -250,18 +488,6 @@ class YoutubeDataset(torch.utils.data.Dataset):
         if force_rgb and img.mode != "RGB":
             img = img.convert("RGB")
         return img
-
-    def crop_and_resize(self, image: Image.Image, target_height: int, target_width: int) -> Image.Image:
-        """Center-crop and resize image to target dimensions."""
-        width, height = image.size
-        scale = max(target_width / width, target_height / height)
-        image = torchvision.transforms.functional.resize(
-            image,
-            (round(height * scale), round(width * scale)),
-            interpolation=torchvision.transforms.InterpolationMode.BILINEAR
-        )
-        image = torchvision.transforms.functional.center_crop(image, (target_height, target_width))
-        return image
 
     def get_height_width(self, image: Image.Image) -> Tuple[int, int]:
         """Calculate target height and width based on image and settings."""
@@ -394,6 +620,7 @@ class FilteredYoutubeDataset(YoutubeDataset):
                 segment_path = os.path.join(video_path, segment_name)
                 origin_path = os.path.join(segment_path, "origin")
                 skeleton_path = os.path.join(segment_path, "skeleton")
+                keypoints_path = os.path.join(segment_path, "keypoints.npy")
                 
                 if not os.path.isdir(origin_path):
                     continue
@@ -434,8 +661,10 @@ class FilteredYoutubeDataset(YoutubeDataset):
                 self.segments.append({
                     "video_id": video_id,
                     "segment": segment_name,
+                    "segment_path": segment_path,
                     "origin_path": origin_path,
                     "skeleton_path": skeleton_path,
+                    "keypoints_path": keypoints_path if os.path.exists(keypoints_path) else None,
                     "origin_frames": origin_frames,
                     "prompt": prompt,
                     "reference_path": ref,
