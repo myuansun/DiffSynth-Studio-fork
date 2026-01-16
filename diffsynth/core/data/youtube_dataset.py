@@ -225,6 +225,11 @@ class YoutubeDataset(torch.utils.data.Dataset):
         # Keypoint-aware cropping:
         use_keypoint_crop: bool = True,
         keypoint_padding: float = 0.15,
+        # Face extraction for animate_face_video:
+        extract_face_video: bool = False,
+        face_crop_size: int = 512,
+        face_padding: float = 0.5,
+        face_upper_shift: float = 0.25,
         # Repeat factor:
         repeat: int = 1,
         # Logging:
@@ -246,6 +251,10 @@ class YoutubeDataset(torch.utils.data.Dataset):
             repeat = getattr(args, 'dataset_repeat', repeat)
             use_keypoint_crop = getattr(args, 'youtube_keypoint_crop', use_keypoint_crop)
             keypoint_padding = getattr(args, 'youtube_keypoint_padding', keypoint_padding)
+            extract_face_video = getattr(args, 'youtube_extract_face_video', extract_face_video)
+            face_crop_size = getattr(args, 'youtube_face_crop_size', face_crop_size)
+            face_padding = getattr(args, 'youtube_face_padding', face_padding)
+            face_upper_shift = getattr(args, 'youtube_face_upper_shift', face_upper_shift)
         
         self.base_folder = base_folder
         self.max_pixels = max_pixels
@@ -276,6 +285,12 @@ class YoutubeDataset(torch.utils.data.Dataset):
         # Keypoint cropping config
         self.use_keypoint_crop = use_keypoint_crop
         self.keypoint_padding = keypoint_padding
+        
+        # Face extraction config
+        self.extract_face_video = extract_face_video
+        self.face_crop_size = face_crop_size
+        self.face_padding = face_padding
+        self.face_upper_shift = face_upper_shift
 
         # Scan segments
         self.segments: List[Dict] = []
@@ -308,9 +323,9 @@ class YoutubeDataset(torch.utils.data.Dataset):
         indices = [start + i * self.stride for i in range(self.sample_frames)]
         names = [origin_frames[min(i, len(origin_frames) - 1)] for i in indices]
 
-        # Load keypoints if available
+        # Load keypoints if available (for both keypoint crop and face extraction)
         keypoints = None
-        if self.use_keypoint_crop and keypoints_path and os.path.exists(keypoints_path):
+        if (self.use_keypoint_crop or self.extract_face_video) and keypoints_path and os.path.exists(keypoints_path):
             try:
                 keypoints = np.load(keypoints_path, allow_pickle=True)
             except Exception:
@@ -366,12 +381,28 @@ class YoutubeDataset(torch.utils.data.Dataset):
         ref_img = self._crop_and_resize(ref_img, ref_crop_box, target_h, target_w)
         reference_list = [ref_img]
 
-        return {
+        # Extract face crops for animate_face_video if enabled
+        face_crops = None
+        if self.extract_face_video:
+            face_crops = []
+            for frame_idx, name in zip(indices, names):
+                img = self._load_pil(os.path.join(origin_path, name))
+                face_box = self._compute_face_crop_box(
+                    keypoints, frame_idx, img.size[0], img.size[1]
+                )
+                face_crop = self._crop_and_resize(img, face_box, self.face_crop_size, self.face_crop_size)
+                face_crops.append(face_crop)
+
+        result = {
             "prompt": seg["prompt"],
             "video": video_imgs,
             "control_video": control_imgs,
             "reference_image": reference_list,
+            "animate_pose_video": control_imgs,  # Alias for Animate model
         }
+        if face_crops is not None:
+            result["animate_face_video"] = face_crops
+        return result
 
     def _center_crop_box(
         self, img_width: int, img_height: int, target_aspect: float
@@ -406,6 +437,80 @@ class YoutubeDataset(torch.utils.data.Dataset):
             interpolation=torchvision.transforms.InterpolationMode.BILINEAR
         )
         return resized
+
+    def _compute_face_crop_box(
+        self,
+        keypoints,
+        frame_idx: int,
+        img_width: int,
+        img_height: int,
+    ) -> Tuple[int, int, int, int]:
+        """
+        Compute a square crop box centered on the face from facial landmarks.
+        
+        Args:
+            keypoints: Loaded keypoints array or None
+            frame_idx: Index of the frame in the keypoints array
+            img_width: Original image width
+            img_height: Original image height
+        
+        Returns:
+            (x1, y1, x2, y2) square crop box in pixel coordinates
+        """
+        # Default to center square crop
+        size = min(img_width, img_height)
+        cx, cy = img_width / 2, img_height / 2
+        
+        # Try to get face landmarks
+        if keypoints is not None and frame_idx < len(keypoints):
+            kp_frame = keypoints[frame_idx]
+            faces = kp_frame.get('faces') if isinstance(kp_frame, dict) else None
+            if faces is not None and len(faces) > 0:
+                face_pts = faces[0]  # Use first detected face (68, 2)
+                
+                # Convert normalized coords to pixels
+                x_coords = face_pts[:, 0] * img_width
+                y_coords = face_pts[:, 1] * img_height
+                
+                # Compute face bounding box
+                x_min, x_max = x_coords.min(), x_coords.max()
+                y_min, y_max = y_coords.min(), y_coords.max()
+                
+                # Add padding
+                face_w = x_max - x_min
+                face_h = y_max - y_min
+                pad_x = face_w * self.face_padding
+                pad_y = face_h * self.face_padding
+                
+                x_min -= pad_x
+                y_min -= pad_y
+                x_max += pad_x
+                y_max += pad_y
+                
+                # Make square (use larger dimension)
+                box_w = x_max - x_min
+                box_h = y_max - y_min
+                size = max(box_w, box_h)
+                cx = (x_min + x_max) / 2
+                cy = (y_min + y_max) / 2
+                
+                # Shift center upward to include forehead/top of head
+                # (68-point landmarks only cover jawline to eyebrows)
+                cy -= face_h * self.face_upper_shift
+        
+        # Compute square crop centered at (cx, cy)
+        half_size = size / 2
+        
+        # Clamp center so crop stays within image
+        cx = max(half_size, min(img_width - half_size, cx))
+        cy = max(half_size, min(img_height - half_size, cy))
+        
+        x1 = int(max(0, cx - half_size))
+        y1 = int(max(0, cy - half_size))
+        x2 = int(min(img_width, cx + half_size))
+        y2 = int(min(img_height, cy + half_size))
+        
+        return (x1, y1, x2, y2)
 
     def _scan_processed_folder(self, folder_path: str, verbose: bool = True):
         """Scan a processed_videos* folder for valid segments."""

@@ -1,5 +1,6 @@
 import torch, os, argparse, accelerate, warnings
 from diffsynth.core import UnifiedDataset
+from diffsynth.core.data import FilteredYoutubeDataset
 from diffsynth.core.data.operators import LoadVideo, LoadAudio, ImageCropAndResize, ToAbsolutePath
 from diffsynth.pipelines.wan_video import WanVideoPipeline, ModelConfig
 from diffsynth.diffusion import *
@@ -128,27 +129,41 @@ if __name__ == "__main__":
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         kwargs_handlers=[accelerate.DistributedDataParallelKwargs(find_unused_parameters=args.find_unused_parameters)],
     )
-    dataset = UnifiedDataset(
-        base_path=args.dataset_base_path,
-        metadata_path=args.dataset_metadata_path,
-        repeat=args.dataset_repeat,
-        data_file_keys=args.data_file_keys.split(","),
-        main_data_operator=UnifiedDataset.default_video_operator(
-            base_path=args.dataset_base_path,
-            max_pixels=args.max_pixels,
+    # Check if using YoutubeDataset (metadata is a JSON file)
+    if args.dataset_metadata_path and args.dataset_metadata_path.endswith('.json'):
+        print(f"Using FilteredYoutubeDataset with metadata: {args.dataset_metadata_path}")
+        dataset = FilteredYoutubeDataset(
+            base_folder=args.dataset_base_path,
+            segment_list_file=args.dataset_metadata_path,
+            args=args,
             height=args.height,
             width=args.width,
-            height_division_factor=16,
-            width_division_factor=16,
-            num_frames=args.num_frames,
-            time_division_factor=4,
-            time_division_remainder=1,
-        ),
-        special_operator_map={
-            "animate_face_video": ToAbsolutePath(args.dataset_base_path) >> LoadVideo(args.num_frames, 4, 1, frame_processor=ImageCropAndResize(512, 512, None, 16, 16)),
-            "input_audio": ToAbsolutePath(args.dataset_base_path) >> LoadAudio(sr=16000),
-        }
-    )
+            sample_frames=args.num_frames,
+            max_pixels=args.max_pixels,
+            repeat=args.dataset_repeat,
+        )
+    else:
+        dataset = UnifiedDataset(
+            base_path=args.dataset_base_path,
+            metadata_path=args.dataset_metadata_path,
+            repeat=args.dataset_repeat,
+            data_file_keys=args.data_file_keys.split(","),
+            main_data_operator=UnifiedDataset.default_video_operator(
+                base_path=args.dataset_base_path,
+                max_pixels=args.max_pixels,
+                height=args.height,
+                width=args.width,
+                height_division_factor=16,
+                width_division_factor=16,
+                num_frames=args.num_frames,
+                time_division_factor=4,
+                time_division_remainder=1,
+            ),
+            special_operator_map={
+                "animate_face_video": ToAbsolutePath(args.dataset_base_path) >> LoadVideo(args.num_frames, 4, 1, frame_processor=ImageCropAndResize(512, 512, None, 16, 16)),
+                "input_audio": ToAbsolutePath(args.dataset_base_path) >> LoadAudio(sr=16000),
+            }
+        )
     
     # Initialize logger first for auto-resume capability
     model_logger = ModelLoggerWithCleanup(

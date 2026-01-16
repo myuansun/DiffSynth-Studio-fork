@@ -1,6 +1,6 @@
 accelerate launch examples/wanvideo/model_training/train.py \
   --dataset_base_path data/example_video_dataset \
-  --dataset_metadata_path data/example_video_dataset/metadata_reference_control.csv \
+  --dataset_metadata_path metadata/filtered_segments.json \
   --data_file_keys "video,control_video,reference_image" \
   --height 480 \
   --width 832 \
@@ -20,7 +20,7 @@ accelerate launch examples/wanvideo/model_training/train.py \
 
 accelerate launch examples/wanvideo/model_training/train.py \
   --dataset_base_path data/example_video_dataset \
-  --dataset_metadata_path data/example_video_dataset/metadata_reference_control.csv \
+  --dataset_metadata_path metadata/filtered_segments.json \
   --data_file_keys "video,control_video,reference_image" \
   --height 480 \
   --width 832 \
