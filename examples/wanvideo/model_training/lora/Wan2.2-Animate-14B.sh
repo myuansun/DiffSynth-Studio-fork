@@ -7,10 +7,13 @@ accelerate launch --config_file examples/wanvideo/model_training/full/accelerate
   --height 480 \
   --width 832 \
   --num_frames 81 \
-  --dataset_repeat 100 \
+  --youtube_smart_repeat \
   --model_id_with_origin_paths "Wan-AI/Wan2.2-Animate-14B:diffusion_pytorch_model*.safetensors,Wan-AI/Wan2.2-Animate-14B:models_t5_umt5-xxl-enc-bf16.pth,Wan-AI/Wan2.2-Animate-14B:Wan2.1_VAE.pth,Wan-AI/Wan2.2-Animate-14B:models_clip_open-clip-xlm-roberta-large-vit-huge-14.pth" \
   --learning_rate 1e-4 \
   --num_epochs 5 \
+  --save_steps 1000 \
+  --use_wandb \
+  --wandb_project "wan-animate-lora" \
   --remove_prefix_in_ckpt "pipe.dit." \
   --output_path "./models/train/Wan2.2-Animate-14B_lora" \
   --lora_base_model "dit" \

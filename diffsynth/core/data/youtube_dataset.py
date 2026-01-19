@@ -232,6 +232,8 @@ class YoutubeDataset(torch.utils.data.Dataset):
         face_upper_shift: float = 0.25,
         # Repeat factor:
         repeat: int = 1,
+        # Smart repeat: expand segments into unique windows instead of flat repeat
+        smart_repeat: bool = False,
         # Logging:
         verbose: bool = True,
         # Command-line args (takes precedence if provided):
@@ -249,6 +251,7 @@ class YoutubeDataset(torch.utils.data.Dataset):
             reference_strategy = getattr(args, 'youtube_reference_strategy', reference_strategy)
             default_prompt = getattr(args, 'youtube_default_prompt', default_prompt)
             repeat = getattr(args, 'dataset_repeat', repeat)
+            smart_repeat = getattr(args, 'youtube_smart_repeat', smart_repeat)
             use_keypoint_crop = getattr(args, 'youtube_keypoint_crop', use_keypoint_crop)
             keypoint_padding = getattr(args, 'youtube_keypoint_padding', keypoint_padding)
             extract_face_video = getattr(args, 'youtube_extract_face_video', extract_face_video)
@@ -281,6 +284,7 @@ class YoutubeDataset(torch.utils.data.Dataset):
         self.device = device
         self.reference_strategy = reference_strategy
         self.repeat = repeat
+        self.smart_repeat = smart_repeat
         
         # Keypoint cropping config
         self.use_keypoint_crop = use_keypoint_crop
@@ -306,20 +310,58 @@ class YoutubeDataset(torch.utils.data.Dataset):
             if use_keypoint_crop:
                 kp_count = sum(1 for s in self.segments if s.get("keypoints_path"))
                 print(f"[YoutubeDataset] {kp_count}/{len(self.segments)} have keypoints for adaptive cropping.")
+        
+        # Build samples list for smart_repeat mode
+        self.samples: List[Tuple[int, int]] = []  # (segment_idx, start_frame)
+        if self.smart_repeat:
+            self._build_smart_samples(verbose=verbose)
+
+    def _build_smart_samples(self, verbose: bool = True):
+        """
+        Expand segments into unique (segment_idx, start_frame) pairs.
+        Each unique window becomes one sample, so longer segments contribute more.
+        """
+        self.samples = []
+        for seg_idx, seg in enumerate(self.segments):
+            num_frames = len(seg['origin_frames'])
+            # Calculate number of unique windows
+            # max_start = num_frames - (sample_frames - 1) * stride - 1
+            max_start = num_frames - (self.sample_frames - 1) * self.stride - 1
+            num_windows = max(1, max_start + 1)
+            for start in range(num_windows):
+                self.samples.append((seg_idx, start))
+        
+        if verbose:
+            print(f"[YoutubeDataset] Smart repeat: expanded to {len(self.samples)} unique windows.")
+            print(f"[YoutubeDataset] Average windows per segment: {len(self.samples) / len(self.segments):.1f}")
 
     def __len__(self) -> int:
+        if self.smart_repeat:
+            return len(self.samples) * self.repeat
         return len(self.segments) * self.repeat
 
     def __getitem__(self, idx: int) -> Dict:
-        seg = self.segments[idx % len(self.segments)]
+        if self.smart_repeat:
+            # Smart repeat mode: use precomputed (segment_idx, start) pairs
+            sample_idx = idx % len(self.samples)
+            seg_idx, start = self.samples[sample_idx]
+            seg = self.segments[seg_idx]
+        else:
+            # Original mode: random start within segment
+            seg = self.segments[idx % len(self.segments)]
+            start = None  # Will be computed below
+        
         origin_frames = seg["origin_frames"]
         origin_path = seg["origin_path"]
         skeleton_path = seg["skeleton_path"]
         keypoints_path = seg.get("keypoints_path")
 
         # Choose a consecutive snippet with stride
-        max_start = len(origin_frames) - (self.sample_frames - 1) * self.stride - 1
-        start = random.randint(0, max(0, max_start))
+        if start is None:
+            # Original random sampling mode
+            max_start = len(origin_frames) - (self.sample_frames - 1) * self.stride - 1
+            start = random.randint(0, max(0, max_start))
+        
         indices = [start + i * self.stride for i in range(self.sample_frames)]
         names = [origin_frames[min(i, len(origin_frames) - 1)] for i in indices]
 

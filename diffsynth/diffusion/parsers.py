@@ -5,6 +5,7 @@ def add_dataset_base_config(parser: argparse.ArgumentParser):
     parser.add_argument("--dataset_base_path", type=str, default="", required=True, help="Base path of the dataset.")
     parser.add_argument("--dataset_metadata_path", type=str, default=None, help="Path to the metadata file of the dataset.")
     parser.add_argument("--dataset_repeat", type=int, default=1, help="Number of times to repeat the dataset per epoch.")
+    parser.add_argument("--youtube_smart_repeat", default=False, action="store_true", help="Enable smart repeat: expand segments into unique windows based on frame count instead of flat repeat.")
     parser.add_argument("--dataset_num_workers", type=int, default=0, help="Number of workers for data loading.")
     parser.add_argument("--data_file_keys", type=str, default="image,video", help="Data file keys in the metadata. Comma-separated.")
     return parser
@@ -37,6 +38,10 @@ def add_training_config(parser: argparse.ArgumentParser):
     parser.add_argument("--find_unused_parameters", default=False, action="store_true", help="Whether to find unused parameters in DDP.")
     parser.add_argument("--weight_decay", type=float, default=0.01, help="Weight decay.")
     parser.add_argument("--task", type=str, default="sft", required=False, help="Task type.")
+    # WandB logging
+    parser.add_argument("--use_wandb", default=False, action="store_true", help="Enable Weights & Biases logging.")
+    parser.add_argument("--wandb_project", type=str, default="diffsynth-training", help="WandB project name.")
+    parser.add_argument("--wandb_run_name", type=str, default=None, help="WandB run name. If None, auto-generated.")
     return parser
 
 def add_output_config(parser: argparse.ArgumentParser):

@@ -141,6 +141,7 @@ if __name__ == "__main__":
             sample_frames=args.num_frames,
             max_pixels=args.max_pixels,
             repeat=args.dataset_repeat,
+            extract_face_video=True,
         )
     else:
         dataset = UnifiedDataset(
