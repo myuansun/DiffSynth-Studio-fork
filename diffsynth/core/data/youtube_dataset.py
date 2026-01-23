@@ -382,19 +382,30 @@ class YoutubeDataset(torch.utils.data.Dataset):
         target_aspect = target_h / target_w
 
         # Compute crop boxes for each frame
-        crop_boxes = []
-        for frame_idx, name in zip(indices, names):
+        # Calculate mean bounding box from valid keypoints
+        all_bboxes = []
+        for frame_idx in indices:
             if keypoints is not None and frame_idx < len(keypoints):
                 kp_frame = keypoints[frame_idx]
                 bbox = compute_keypoint_bbox(
                     kp_frame, img_width, img_height,
                     padding=self.keypoint_padding
                 )
-                crop_box = compute_adaptive_crop_box(bbox, img_width, img_height, target_aspect)
-            else:
-                # Fallback to center crop
-                crop_box = self._center_crop_box(img_width, img_height, target_aspect)
-            crop_boxes.append(crop_box)
+                all_bboxes.append(bbox)
+        
+        if all_bboxes:
+            # Calculate mean bbox
+            all_bboxes = np.array(all_bboxes)
+            mean_bbox = np.mean(all_bboxes, axis=0)
+            x1, y1, x2, y2 = mean_bbox
+            # Round to int
+            fixed_bbox = (int(x1), int(y1), int(x2), int(y2))
+            fixed_crop_box = compute_adaptive_crop_box(fixed_bbox, img_width, img_height, target_aspect)
+        else:
+            # Fallback to center crop
+            fixed_crop_box = self._center_crop_box(img_width, img_height, target_aspect)
+        
+        crop_boxes = [fixed_crop_box] * len(names)
 
         # Load and crop origin frames
         video_imgs = []
