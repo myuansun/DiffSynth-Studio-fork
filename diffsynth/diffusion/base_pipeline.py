@@ -4,6 +4,7 @@ import numpy as np
 from einops import repeat, reduce
 from typing import Union
 from ..core import AutoTorchModule, AutoWrappedLinear, load_state_dict, ModelConfig, parse_device_type
+from ..core.device.npu_compatible_device import get_device_type
 from ..utils.lora import GeneralLoRALoader
 from ..models.model_loader import ModelPool
 from ..utils.controlnet import ControlNetInput
@@ -61,7 +62,7 @@ class BasePipeline(torch.nn.Module):
 
     def __init__(
         self,
-        device="cuda", torch_dtype=torch.float16,
+        device=get_device_type(), torch_dtype=torch.float16,
         height_division_factor=64, width_division_factor=64,
         time_division_factor=None, time_division_remainder=None,
     ):
@@ -295,6 +296,7 @@ class BasePipeline(torch.nn.Module):
                 vram_config=vram_config,
                 vram_limit=vram_limit,
                 clear_parameters=model_config.clear_parameters,
+                state_dict=model_config.state_dict,
             )
         return model_pool
     
@@ -316,7 +318,14 @@ class BasePipeline(torch.nn.Module):
             if inputs_shared.get("positive_only_lora", None) is not None:
                 self.clear_lora(verbose=0)
             noise_pred_nega = model_fn(**inputs_nega, **inputs_shared, **inputs_others)
-            noise_pred = noise_pred_nega + cfg_scale * (noise_pred_posi - noise_pred_nega)
+            if isinstance(noise_pred_posi, tuple):
+                # Separately handling different output types of latents, eg. video and audio latents.
+                noise_pred = tuple(
+                    n_nega + cfg_scale * (n_posi - n_nega)
+                    for n_posi, n_nega in zip(noise_pred_posi, noise_pred_nega)
+                )
+            else:
+                noise_pred = noise_pred_nega + cfg_scale * (noise_pred_posi - noise_pred_nega)
         else:
             noise_pred = noise_pred_posi
         return noise_pred
