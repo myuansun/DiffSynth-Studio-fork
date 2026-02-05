@@ -17,12 +17,22 @@ def _default_prompt() -> str:
     )
 
 
+def _default_motion_video(fork_root: Path) -> Path:
+    candidates = [
+        fork_root / "test" / "video.mp4",
+        fork_root / "test" / "video_ue.mp4",
+        fork_root / "test" / "video_unity.mp4",
+    ]
+    for p in candidates:
+        if p.exists():
+            return p
+    return candidates[0]
+
+
 def _add_repo_paths():
     script_path = Path(__file__).resolve()
     fork_root = script_path.parents[4]  # DiffSynth-Studio-fork
-    repo_root = fork_root.parent  # /home/.../diffsynth
     sys.path.insert(0, str(fork_root))
-    sys.path.insert(0, str(repo_root / "Mimicmotion"))
     return fork_root
 
 
@@ -43,7 +53,7 @@ def _resolve_dwpose_device(dwpose_device: str) -> str:
 def parse_args(fork_root: Path) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--lora_ckpt", type=Path, default=fork_root / "models" / "step-10000.safetensors")
-    parser.add_argument("--motion_video", type=Path, default=fork_root / "test" / "video.mp4")
+    parser.add_argument("--motion_video", type=Path, default=_default_motion_video(fork_root))
     parser.add_argument("--ref_image", type=Path, default=fork_root / "test" / "reference_image.png")
     parser.add_argument("--out", type=Path, default=fork_root / "test" / "out_wan22_animate_lora_step10000.mp4")
     parser.add_argument("--dwpose_dir", type=Path, default=fork_root / "models" / "DWPose")
